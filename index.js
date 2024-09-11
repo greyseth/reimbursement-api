@@ -12,11 +12,11 @@ const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 app.use(cors());
-// app.use(function (req, res, next) {
-//   if (!req.headers.account_token)
-//     return res.status(400).json({ error: "Missing 'account_token' header" });
-//   next();
-// });
+app.use(function (req, res, next) {
+  if (!req.headers.account_token)
+    return res.status(400).json({ error: "Missing 'account_token' header" });
+  next();
+});
 
 app.get("/", async (req, res) => {
   res.status(200).send("Server is up and good!");
