@@ -2,9 +2,7 @@ const express = require("express");
 const multer = require("multer");
 const router = express.Router();
 
-const approveVerify = require("./approveVerify");
 const connection = require("../db");
-const realisasiVerify = require("../middlewares/realisasiVerify");
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -16,78 +14,103 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({ storage: storage });
+const uploadArray = upload.array("images");
 
-router.post("/", approveVerify, async (req, res) => {
-  const content = req.body;
-  if (!content.id_request || content.diterima === null)
-    return res
-      .status(400)
-      .json({ error: "Missing one ore more required parameters" });
-  if (!content.catatan) content.catatan = "";
-
-  const supervisorQuery = `INSERT INTO supervisor_approval(id_supervisor, catatan, tanggal_approval, diterima, id_request) 
-    VALUES (${res.locals.user_id}, '${content.catatan}', NOW(), ${content.diterima}, ${content.id_request});`;
-
-  const financeQuery = `INSERT INTO finance_approval(id_finance, catatan, tanggal_approval, diterima, id_request)
-    VALUES (${res.locals.user_id}, '${content.catatan}', NOW(), ${content.diterima}, ${content.id_request});`;
-
+const roleCheck = (req, res, next) => {
   connection.query(
-    res.locals.role === "supervisor" ? supervisorQuery : financeQuery,
+    `
+    SELECT user.id_user, user.role, request.id_project, project.id_supervisor, departemen.id_leader 
+    FROM user 
+    LEFT JOIN request ON request.id_request = ? 
+    LEFT JOIN project ON project.id_project = request.id_project 
+    LEFT JOIN user owner ON owner.id_user = request.id_user 
+    LEFT JOIN departemen ON departemen.id_departemen = owner.id_departemen
+    WHERE user.login_token = ? GROUP BY user.id_user;`,
+    [req.params.id_request, req.headers.account_token],
     (err, rows, fields) => {
-      if (err)
-        return res
-          .status(500)
-          .json({ error: "Approval Query: " + err.message });
-      res.sendStatus(200);
+      if (err) return res.status(500).json({ error: err.message });
+      if (rows.length < 1)
+        return res.status(401).json({ error: "Invalid account token" });
+
+      const check = rows[0];
+      res.locals.role = check.role;
+      res.locals.id_user = check.id_user;
+
+      // Checks if user is finance or realisasi
+      if (check.role === "finance" || check.role === "realisasi") return next();
+
+      // Checks if request is project based
+      if (check.id_project) {
+        if (check.id_user === check.id_supervisor) {
+          res.locals.role = "supervisor";
+          next();
+        } else return res.status(401).json({ error: "Unauthorized access" });
+      } else {
+        if (check.id_user === check.id_leader) {
+          res.locals.role = "supervisor";
+          next();
+        } else return res.status(401).json({ error: "Unauthorized access" });
+      }
     }
   );
+};
+router.post("/:id_request", roleCheck, async (req, res) => {
+  const content = req.body;
+  // Optional fields: catatan, diterima, images in req.files
+
+  uploadArray(req, res, (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    connection.beginTransaction((err) => {
+      if (err) return res.status(500).json({ error: err.message });
+
+      // Request to create approval
+      connection.query(
+        `INSERT INTO approval(id_request, catatan, tanggal_approval, diterima, id_approver, type) VALUES (?, ?, NOW(), ?, ?, ?)`,
+        [
+          req.params.id_request,
+          content.catatan ?? "",
+          content.diterima ? 1 : 0,
+          res.locals.id_user,
+          res.locals.role,
+        ],
+        (err, rows, fields) => {
+          if (err)
+            return connection.rollback(() =>
+              res.status(500).json({ error: err.message })
+            );
+          const insertId = rows.insertId;
+
+          //Inserts images
+          let images = [];
+          if (req.files)
+            req.files.forEach((f) => {
+              images.push([insertId, f.filename]);
+            });
+          connection.query(
+            images.length > 0
+              ? "INSERT INTO approval_gambar(id_approval, nama_file) VALUES ?"
+              : "SELECT NULL",
+            [images],
+            (err, rows, fields) => {
+              if (err)
+                return connection.rollback(() =>
+                  res.status(500).json({ error: err.message })
+                );
+              connection.commit((err) => {
+                if (err)
+                  connection.rollback(() =>
+                    res.status(500).json({ error: err.message })
+                  );
+                res.status(200).json({ success: true });
+              });
+            }
+          );
+        }
+      );
+    });
+  });
 });
-
-router.post(
-  "/confirmpay",
-  [realisasiVerify, upload.array("images")],
-  async (req, res) => {
-    const content = req.body;
-    if (!content.id_approval)
-      return res
-        .status(400)
-        .json({ error: "Missing one or more required parameters" });
-
-    //Acquires request id and data
-    connection.query(
-      `SELECT * FROM finance_approval WHERE id_approval = ${content.id_approval};`,
-      (err, rows, fields) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (rows.length < 1)
-          return res.status(404).json({ error: "id_approval not found" });
-
-        //Updates request row data
-        connection.query(
-          `UPDATE request SET dibayarkan = TRUE, tanggal_bayar = NOW() WHERE id_request = ${rows[0].id_request};`,
-          (err, rows, fields) => {
-            if (err) return res.status(500).json({ error: err.message });
-
-            if (req.files.length > 1) {
-              //Inserts all images
-              let imageQuery =
-                "INSERT INTO approval_gambar(id_approval, nama_file) VALUES ";
-              req.files.forEach((file, index) => {
-                imageQuery += `(${content.id_approval}, '${file.filename}')${
-                  index === req.files.length - 1 ? ";" : ","
-                }`;
-              });
-
-              connection.query(imageQuery, (err, rows, fields) => {
-                if (err) return res.status(500).json({ error: err.message });
-                res.sendStatus(200);
-              });
-            } else res.sendStatus(200);
-          }
-        );
-      }
-    );
-  }
-);
 
 router.get("/images/:approval_id", async (req, res) => {
   connection.query(

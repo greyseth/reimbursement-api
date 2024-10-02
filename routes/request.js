@@ -4,24 +4,9 @@ const multer = require("multer");
 const connection = require("../db");
 
 const requestOwnerVerify = require("../middlewares/requestOwnerVerify");
-const supervisorVerify = require("../middlewares/supervisorVerify");
-const financeVerify = require("../middlewares/financeVerify");
-const realisasiVerify = require("../middlewares/realisasiVerify");
-const { createWorksheet } = require("../excelutil");
-const addInstanceCheck = function (req, res, next) {
-  connection.query(
-    `SELECT user.id_user, user.role, instansi.id_instansi AS instansi FROM user LEFT JOIN instansi ON user.id_instansi = instansi.id_instansi WHERE user.login_token = '${req.headers.account_token}';`,
-    (err, rows, fields) => {
-      if (err) return res.status(500).json({ error: err.message });
-      if (rows.length < 1)
-        return res.status(401).json({ error: "Unauthorized access" });
-      res.locals.id_user = rows[0].id_user;
-      res.locals.role = rows[0].role;
-      res.locals.instansi = rows[0].instansi;
-      next();
-    }
-  );
-};
+const { createWorksheet } = require("../excelUtil");
+const requestCreateVerify = require("../middlewares/requestCreateVerify");
+const userVerify = require("../middlewares/userVerify");
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -33,130 +18,259 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({ storage: storage });
+const arrayUpload = upload.array("images");
 
-router.post(
-  "/uploadimages",
-  [requestOwnerVerify, upload.array("images")],
-  async (req, res) => {
-    if (!req.files)
-      return res.status(500).json({ error: "Failed to upload images" });
-
-    const content = req.body;
-    if (!content.request_id)
-      return res.status(400).json({ error: "Missing request_id parameter" });
-
-    let addQuery = "VALUES ";
-    req.files.forEach((file, index) => {
-      addQuery += `(${content.request_id}, ${file.filename})${
-        index === req.files.length - 1 ? ";" : ","
-      }`;
-    });
-
-    connection.query(
-      `INSERT INTO request_gambar(id_request, nama_file) ${addQuery}`,
-      (err, rows, fields) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.sendStatus(200);
-      }
-    );
-  }
-);
-
-router.post("/add", addInstanceCheck, async (req, res) => {
+router.post("/add", requestCreateVerify, async (req, res) => {
   const content = req.body;
   if (
     !content.metode_pembayaran ||
-    !content.department ||
     !content.judul ||
     !content.deskripsi ||
-    !content.barang
+    !content.barang ||
+    content.barang.length < 1
   )
     return res
       .status(400)
       .json({ error: "Missing one or more required parameters" });
 
-  if (!content.nama_project) content.nama_project = "";
-  if (!content.nama_client) content.nama_client = "";
-  if (!content.nomor_po) content.nomor_po = "";
+  arrayUpload(req, res, (err) => {
+    if (err) return res.status(500).json({ error: err.message });
 
-  connection.query(
-    `INSERT INTO request(id_user, metode_pembayaran, tanggal_request, department, id_instansi, judul, deskripsi, nama_project, nama_client, nomor_po)
-    VALUES ('${res.locals.id_user}', '${content.metode_pembayaran}', NOW(), '${content.department}', ${res.locals.instansi}, '${content.judul}', '${content.deskripsi}', '${content.nama_project}', '${content.nama_client}', '${content.nomor_po}')`,
-    (err, rows, fields) => {
+    connection.beginTransaction((err) => {
       if (err) return res.status(500).json({ error: err.message });
 
-      let barangQuery =
-        "INSERT INTO barang(id_request, nama, jumlah, harga, tanggal_pembelian) VALUES";
-      content.barang.forEach((b, i) => {
-        barangQuery += `(${rows.insertId}, '${b.nama}', ${b.jumlah}, ${
-          b.harga
-        }, '${b.tanggal_pembelian}')${
-          i === content.barang.length - 1 ? ";" : ","
-        }`;
-      });
+      // Inserts base request data
+      connection.query(
+        `
+        INSERT INTO request(id_user, judul, deskripsi, metode_pembayaran, id_project, id_instansi, tanggal_request) 
+        VALUES(${res.locals.id_user}, ?, ?, ?, ?, ?, NOW())
+        `,
+        [
+          content.judul,
+          content.deskripsi ?? "",
+          content.metode_pembayaran,
+          content.id_project,
+          content.id_instansi ?? res.locals.id_instansi,
+        ],
+        (err, rows, fields) => {
+          if (err)
+            return connection.rollback(() =>
+              res.status(500).json({ error: err.message })
+            );
 
-      connection.query(barangQuery, (err, rows, fields) => {
-        if (err) return res.status(500).json({ error: err.message });
+          let insertId = rows.insertId;
 
-        if (res.locals.role === "supervisor") {
+          // Inserts images
+          let images = [];
+          if (req.files)
+            req.files.forEach((f) => {
+              images.push([insertId, f.filename]);
+            });
           connection.query(
-            `INSERT INTO supervisor_approval(id_supervisor, catatan, tanggal_approval, diterima, id_request)
-            VALUES (${res.locals.id_user}, '', NOW(), TRUE, ${rows.insertId})`,
+            `INSERT INTO request_gambar(id_request, nama_file) VALUES ?`,
+            [images],
             (err, rows, fields) => {
-              if (err) return res.status(500).json({ error: err.message });
-              res.sendStatus(200);
+              if (err)
+                return connection.rollback(() =>
+                  res.status(500).json({ error: err.message })
+                );
+
+              // Query for items in request
+              let barangQuery =
+                "INSERT INTO barang(id_request, nama, jumlah, harga, tanggal_pembelian) VALUES ?";
+              let barangItems = [];
+              content.barang.forEach((b, i) => {
+                barangItems.push([
+                  insertId,
+                  b.nama,
+                  b.jumlah,
+                  b.harga,
+                  b.tanggal_pembelian,
+                ]);
+              });
+
+              if (res.locals.isSupervisor || res.locals.isDepartmentLeader) {
+                // Creates deafult approval if project manager or department leader
+                let defaultApprovalQuery = "";
+
+                if (res.locals.isSupervisor)
+                  defaultApprovalQuery = `INSERT INTO approval(id_request, tanggal_approval, diterima, id_approver, type) 
+              VALUES(${insertId}, NOW(), TRUE, ${res.locals.id_user}, 'supervisor');`;
+
+                if (res.locals.isDepartmentLeader)
+                  defaultApprovalQuery = `INSERT INTO approval(id_request, tanggal_approval, diterima, id_approver, type)
+              VALUES(${insertId}, NOW(), TRUE, ${res.locals.id_user}, 'supervisor');`;
+
+                connection.query(defaultApprovalQuery, (err, rows, fields) => {
+                  if (err)
+                    return connection.rollback(() =>
+                      res.status(500).json({ error: err.message })
+                    );
+
+                  // Inserts items
+                  connection.query(
+                    barangQuery,
+                    [barangItems],
+                    (err, rows, fields) => {
+                      if (err)
+                        return connection.rollback(() =>
+                          res.status(500).json({ error: err.message })
+                        );
+
+                      connection.commit((err) => {
+                        if (err)
+                          return res.status(500).json({ error: err.message });
+                        res.status(200).json({ success: true });
+                      });
+                    }
+                  );
+                });
+              }
+              // Inserts items
+              else
+                connection.query(
+                  barangQuery,
+                  [barangItems],
+                  (err, rows, fields) => {
+                    if (err)
+                      return connection.rollback(() =>
+                        res.status(500).json({ error: err.message })
+                      );
+
+                    connection.commit((err) => {
+                      if (err)
+                        return res.status(500).json({ error: err.message });
+                      res.status(200).json({ success: true });
+                    });
+                  }
+                );
             }
           );
-        } else res.sendStatus(200);
-      });
-    }
-  );
+        }
+      );
+    });
+  });
 });
 
-router.get("/supervisor", supervisorVerify, async (req, res) => {
-  connection.query(
-    `SELECT request.*, user.username, user_gambar.nama_file, supervisor_approval.diterima AS supervisor_approval, finance_approval.diterima AS finance_approval, finance_approval.dibayarkan AS finance_dibayarkan 
-    FROM request 
-    LEFT JOIN user ON request.id_user = user.id_user LEFT JOIN user_gambar ON user.id_user = user_gambar.id_user 
-    LEFT JOIN supervisor_approval ON request.id_request = supervisor_approval.id_request 
-    LEFT JOIN finance_approval ON request.id_request = finance_approval.id_request 
-    WHERE request.id_instansi = ${res.locals.id_instansi};`,
-    (err, rows, fields) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.status(200).json(rows);
-    }
-  );
-});
+router.put("/:id_request", requestOwnerVerify, async (req, res) => {
+  const content = req.body;
+  if (
+    !content.judul ||
+    !content.metode_pembayaran ||
+    !content.barang ||
+    content.barang.length < 1
+  )
+    return res
+      .status(400)
+      .json({ error: "Missing one or more required parameters" });
 
-router.get("/finance", financeVerify, async (req, res) => {
-  connection.query(
-    `SELECT request.*, user.username, user_gambar.nama_file, supervisor_approval.diterima AS supervisor_approval, finance_approval.diterima AS finance_approval, finance_approval.dibayarkan AS finance_dibayarkan 
-    FROM request 
-    LEFT JOIN user ON request.id_user = user.id_user LEFT JOIN user_gambar ON user.id_user = user_gambar.id_user 
-    LEFT JOIN supervisor_approval ON request.id_request = supervisor_approval.id_request 
-    LEFT JOIN finance_approval ON request.id_request = finance_approval.id_request 
-    WHERE request.id_instansi = ${res.locals.id_instansi} AND supervisor_approval.diterima <> NULL AND supervisor_approval.diterima <> FALSE;`,
-    (err, rows, fields) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.status(200).json(rows);
-    }
-  );
-});
+  arrayUpload(req, res, (err) => {
+    if (err) return res.status(500).json({ error: err.message });
 
-router.get("/realisasi", realisasiVerify, async (req, res) => {
-  connection.query(
-    `
-    SELECT request.*, user.username, user_gambar.nama_file, supervisor_approval.diterima AS supervisor_approval, finance_approval.diterima AS finance_approval, finance_approval.dibayarkan AS finance_dibayarkan 
-    FROM request 
-    LEFT JOIN user ON request.id_user = user.id_user LEFT JOIN user_gambar ON user.id_user = user_gambar.id_user 
-    LEFT JOIN supervisor_approval ON request.id_request = supervisor_approval.id_request 
-    LEFT JOIN finance_approval ON request.id_request = finance_approval.id_request 
-    WHERE finance_approval.diterima <> NULL AND finance_approval.diterima <> FALSE;`,
-    (err, rows, fields) => {
+    connection.beginTransaction((err) => {
       if (err) return res.status(500).json({ error: err.message });
-      res.status(200).json(rows);
-    }
-  );
+
+      // Edit basic request data
+      connection.query(
+        `UPDATE request SET judul = ?, deskripsi = ?, metode_pembayaran = ? WHERE id_request = ?`,
+        [
+          content.judul,
+          content.description ?? "",
+          content.metode_pembayaran,
+          req.params.id_request,
+        ],
+        (err, rows, fields) => {
+          if (err)
+            return connection.rollback(() =>
+              res.status(500).json({ error: err.message })
+            );
+          if (rows.changedRows < 1)
+            return connection.rollback(() =>
+              res.status(500).json({
+                error: "id_request of " + req.params.id_request + " not found",
+              })
+            );
+
+          // Handles images
+          let images = [];
+          if (req.files)
+            req.files.forEach((f) => {
+              images.push([req.params.id_request, f.filename]);
+            });
+          //-Deletes previous images
+          connection.query(
+            `DELETE FROM request_gambar WHERE id_request = ?`,
+            [req.params.id_request],
+            async (err, rows, fields) => {
+              if (err)
+                return connection.rollback(() =>
+                  res.status(500).json({ error: err.message })
+                );
+
+              //-Inserts new images
+              connection.query(
+                // (Replaces empty query. I know, I hate myself for coming up with this, too)
+                images.length > 0
+                  ? "INSERT INTO request_gambar(id_request, nama_file) VALUES ?"
+                  : "SELECT NULL;",
+                [images],
+                (err, rows, fields) => {
+                  if (err)
+                    return connection.rollback(() =>
+                      res.status(500).json({ ...err })
+                    );
+
+                  // Handles items
+                  let items = [];
+                  content.barang.forEach((b) => {
+                    items.push([
+                      req.params.id_request,
+                      b.nama,
+                      b.jumlah,
+                      b.harga,
+                      b.tanggal_pembelian,
+                    ]);
+                  });
+                  //-Deletes previous items
+                  connection.query(
+                    `DELETE FROM barang WHERE id_request = ${req.params.id_request};`,
+                    async (err, rows, fields) => {
+                      if (err)
+                        return connection.rollback(() =>
+                          res
+                            .status(500)
+                            .json({ error: "barangdeletion " + err.message })
+                        );
+
+                      //-Inserts new items
+                      connection.query(
+                        `INSERT INTO barang(id_request, nama, jumlah, harga, tanggal_pembelian) VALUES ?`,
+                        [items],
+                        (err, rows, fields) => {
+                          if (err)
+                            return connection.rollback(() =>
+                              res.status(500).json({ error: err.message })
+                            );
+
+                          connection.commit((err) => {
+                            if (err)
+                              return res
+                                .status(500)
+                                .json({ error: err.message });
+                            res.status(200).json({ success: true });
+                          });
+                        }
+                      );
+                    }
+                  );
+                }
+              );
+            }
+          );
+        }
+      );
+    });
+  });
 });
 
 router.get("/export/:request_id", async (req, res) => {
@@ -167,6 +281,66 @@ router.get("/export/:request_id", async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+router.get("/own", userVerify, async (req, res) => {
+  connection.query(
+    `SELECT request.id_request, request.judul, request.tanggal_request, SUM(barang.harga) AS jumlah, 
+    s_approval.diterima AS supervisor_diterima,
+    f_approval.diterima AS finance_diterima, 
+    r_approval.diterima AS realisasi_diterima 
+    FROM request 
+    LEFT JOIN barang ON request.id_request = barang.id_request 
+    LEFT JOIN approval s_approval ON request.id_request = s_approval.id_request AND s_approval.type = 'supervisor' AND s_approval.diterima = TRUE 
+    LEFT JOIN approval f_approval ON request.id_request = f_approval.id_request AND f_approval.type = 'finance' AND f_approval.diterima = TRUE 
+    LEFT JOIN approval r_approval ON request.id_request = r_approval.id_request AND r_approval.type = 'realisasi' AND r_approval.diterima = TRUE 
+    WHERE request.id_user = ${res.locals.id_user} GROUP BY request.id_request;`,
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.status(200).json(rows);
+    }
+  );
+});
+
+router.get("/project/:id_project", userVerify, async (req, res) => {
+  connection.query(
+    `SELECT request.id_request, request.judul, request.tanggal_request, SUM(barang.harga) AS jumlah, 
+    s_approval.diterima AS supervisor_diterima,
+    f_approval.diterima AS finance_diterima, 
+    r_approval.diterima AS realisasi_diterima 
+    FROM request 
+    LEFT JOIN barang ON request.id_request = barang.id_request 
+    LEFT JOIN approval s_approval ON request.id_request = s_approval.id_request AND s_approval.type = 'supervisor' AND s_approval.diterima = TRUE 
+    LEFT JOIN approval f_approval ON request.id_request = f_approval.id_request AND f_approval.type = 'finance' AND f_approval.diterima = TRUE 
+    LEFT JOIN approval r_approval ON request.id_request = r_approval.id_request AND r_approval.type = 'realisasi' AND r_approval.diterima = TRUE 
+    WHERE request.id_project = ${req.params.id_project} GROUP BY request.id_request;
+    `,
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.status(200).json(rows);
+    }
+  );
+});
+
+router.get("/department/:id_department", userVerify, async (req, res) => {
+  connection.query(
+    `SELECT request.id_request, request.judul, request.tanggal_request, SUM(barang.harga) AS jumlah, 
+    s_approval.diterima AS supervisor_diterima,
+    f_approval.diterima AS finance_diterima, 
+    r_approval.diterima AS realisasi_diterima 
+    FROM request 
+    LEFT JOIN barang ON request.id_request = barang.id_request 
+    LEFT JOIN user owner ON request.id_user = owner.id_user 
+    LEFT JOIN approval s_approval ON request.id_request = s_approval.id_request AND s_approval.type = 'supervisor' AND s_approval.diterima = TRUE 
+    LEFT JOIN approval f_approval ON request.id_request = f_approval.id_request AND f_approval.type = 'finance' AND f_approval.diterima = TRUE 
+    LEFT JOIN approval r_approval ON request.id_request = r_approval.id_request AND r_approval.type = 'realisasi' AND r_approval.diterima = TRUE 
+    WHERE request.id_project IS NULL AND owner.id_departemen = ${req.params.id_department} GROUP BY request.id_request;
+    `,
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.status(200).json(rows);
+    }
+  );
 });
 
 router.delete("/:request_id", requestOwnerVerify, async (req, res) => {
@@ -181,8 +355,73 @@ router.delete("/:request_id", requestOwnerVerify, async (req, res) => {
 
 router.get("/:request_id", async (req, res) => {
   try {
-    const requestData = await getRequestData(req);
-    res.status(200).json(requestData);
+    const data = await getRequestData(req);
+
+    // Creates a more digestible response format
+    let requestDetails = {};
+    let instansi = undefined;
+    let departemen = {};
+    let project = undefined;
+    let requestOwner = {};
+    let supervisorApproval = undefined;
+    let financeApproval = undefined;
+    let images = data.images;
+    let items = data.items;
+
+    requestDetails.id_request = data.id_request;
+    requestDetails.judul = data.judul;
+    requestDetails.deskripsi = data.deskripsi;
+    requestDetails.tanggal_request = data.tanggal_request;
+
+    if (data.instansi_nama) {
+      instansi = {};
+      instansi.nama = data.instansi_nama;
+      instansi.alamat = instansi.instansi_alamat;
+    }
+
+    departemen.nama = data.departemen_nama;
+    departemen.leader = data.departemen_username;
+    if (data.project_id) {
+      project = {};
+      project.id_project = data.project_id;
+      project.nama = data.project_nama;
+      project.client = data.project_client;
+      project.supervisor = data.project_username;
+    }
+
+    requestOwner.id_user = data.id_user;
+    requestOwner.nama = data.owner_username;
+    requestOwner.rekening = data.owner_rekening;
+
+    if (data.s_app_diterima !== null) {
+      supervisorApproval = {};
+      supervisorApproval.diterima = data.s_app_diterima;
+      supervisorApproval.catatan = data.s_app_catatan;
+      supervisorApproval.approver = data.s_app_username;
+      supervisorApproval.tanggal_approval = data.s_app_tanggal_approval;
+    }
+
+    if (data.f_app_diterima !== null) {
+      financeApproval = {};
+      financeApproval.diterima = data.f_app_diterima;
+      financeApproval.catatan = data.f_app_diterima;
+      financeApproval.approver = data.f_app_username;
+      financeApproval.tanggal_approval = data.f_app_tanggal_approval;
+    }
+
+    res.status(200).json({
+      details: requestDetails,
+      owner: requestOwner,
+      instansi: instansi,
+      departemen: departemen,
+      project: project,
+      approval: {
+        supervisor: supervisorApproval,
+        finance: financeApproval,
+      },
+      images: images,
+      items: items,
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -191,38 +430,64 @@ router.get("/:request_id", async (req, res) => {
 async function getRequestData(req) {
   const requestId = req.params.request_id;
 
-  // Wrap the first query in a promise
   const generalInfoQuery = new Promise((resolve, reject) => {
+    /*
+        - Everything from request
+        requestor   - username
+                    - rekening
+        instansi    - nama
+                    - alamat
+        supervisorA - diterima
+                    - catatan
+                    - supervisor username
+                    - tanggal approval
+        financeA    - diterima catatan
+                    - catatan
+                    - finance username
+                    - tanggal approval
+        project     - nama project
+                    - nama client
+                    - nama PM
+        departemen  - nama departemen
+                    - nama leader
+    */
+
     connection.query(
-      `SELECT request.*, owner.username AS owner, owner_image.nama_file AS user_gambar, owner.rekening AS owner_rekening,
-        instansi.nama AS nama_instansi, instansi.alamat AS alamat_instansi, 
-        supervisor.username AS supervisor, supervisor_image.nama_file AS supervisor_image, 
-        finance.username AS finance, finance_image.nama_file AS finance_image, 
-        supervisor_approval.diterima AS supervisor_diterima, supervisor_approval.catatan AS supervisor_catatan, 
-        supervisor_approval.tanggal_approval AS supervisor_tanggal, 
-        finance_approval.diterima AS finance_diterima, finance_approval.dibayarkan AS finance_dibayarkan, 
-        finance_approval.catatan AS finance_catatan, finance_approval.tanggal_approval AS finance_tanggal 
-        FROM request 
-        LEFT JOIN instansi ON request.id_instansi = instansi.id_instansi 
-        LEFT JOIN supervisor_approval ON request.id_request = supervisor_approval.id_request 
-        LEFT JOIN finance_approval ON request.id_request = finance_approval.id_request 
-        LEFT JOIN user owner ON request.id_user = owner.id_user 
-        LEFT JOIN user_gambar owner_image ON owner.id_user = owner_image.id_user 
-        LEFT JOIN user supervisor ON supervisor_approval.id_supervisor = supervisor.id_user 
-        LEFT JOIN user_gambar supervisor_image ON supervisor_approval.id_supervisor = supervisor_image.id_user 
-        LEFT JOIN user finance ON finance_approval.id_finance = finance.id_user 
-        LEFT JOIN user_gambar finance_image ON finance_approval.id_finance = finance_image.id_user 
-        WHERE request.id_request = ${requestId} 
-        GROUP BY request.id_request;`,
-      (err, rows) => {
+      `
+      SELECT 
+      request.*,
+      owner.username AS owner_username, owner.rekening AS owner_rekening,
+      instansi.nama AS instansi_nama, instansi.alamat AS instansi_alamat,
+      s_app.diterima AS s_app_diterima, s_app.catatan AS s_app_catatan, s_app.tanggal_approval AS s_app_tanggal_approval,
+      s_app_user.username AS s_app_username,
+      f_app.diterima AS f_app_diterima, f_app.catatan AS f_app_catatan, f_app.tanggal_approval AS f_app_tanggal_approval,
+      f_app_user.username AS f_app_username,
+      project.id_project AS project_id, project.nama_project AS project_nama, project.nama_client AS project_client,
+      project_pm.username AS project_username,
+      departemen.nama_departemen AS departemen_nama,
+      departemen_leader.username AS departemen_username
+      FROM request 
+      LEFT JOIN user owner ON request.id_user = owner.id_user 
+      LEFT JOIN instansi ON request.id_instansi = instansi.id_instansi 
+      LEFT JOIN approval s_app ON request.id_request = s_app.id_request AND s_app.type = 'supervisor' 
+      LEFT JOIN user s_app_user ON s_app.id_approver = s_app_user.id_user 
+      LEFT JOIN approval f_app ON request.id_request = f_app.id_request AND f_app.type = 'finance' 
+      LEFT JOIN user f_app_user ON f_app.id_approver = f_app_user.id_user 
+      LEFT JOIN project ON request.id_project = project.id_project 
+      LEFT JOIN user project_pm ON project.id_supervisor = project_pm.id_user 
+      LEFT JOIN departemen ON departemen.id_departemen = owner.id_departemen 
+      LEFT JOIN user departemen_leader ON departemen.id_leader = departemen_leader.id_user 
+      WHERE request.id_request = ${requestId} 
+      GROUP BY request.id_request;
+      `,
+      (err, rows, fields) => {
         if (err) return reject(err);
-        if (rows.length < 1) return reject(new Error("Request not found"));
+        if (rows.length < 1) return reject(new Error("Not found"));
         resolve(rows[0]);
       }
     );
   });
 
-  // Wrap the image query in a promise
   const imagesQuery = new Promise((resolve, reject) => {
     connection.query(
       `SELECT * FROM request_gambar WHERE id_request = ${requestId};`,
@@ -233,7 +498,6 @@ async function getRequestData(req) {
     );
   });
 
-  // Wrap the items query in a promise
   const itemsQuery = new Promise((resolve, reject) => {
     connection.query(
       `SELECT * FROM barang WHERE id_request = ${requestId};`,

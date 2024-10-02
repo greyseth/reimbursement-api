@@ -5,9 +5,9 @@ const encryptUtil = require("../encryptUtil");
 const adminVerify = require("../middlewares/adminVerify");
 const connection = require("../db");
 
-router.get("/all", adminVerify, async (req, res) => {
+router.get("/all", async (req, res) => {
   connection.query(
-    `SELECT user.id_user, user.username, user.role FROM user LEFT JOIN instansi ON user.id_instansi = instansi.id_instansi GROUP BY user.id_user;`,
+    `SELECT id_user, username, role FROM user;`,
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
       else return res.status(200).json(rows);
@@ -17,13 +17,14 @@ router.get("/all", adminVerify, async (req, res) => {
 
 router.post("/login", async (req, res) => {
   const content = req.body;
+  console.log(content);
   if (!content.email || !content.password)
     return res
       .status(400)
       .json({ error: "Missing one or more required parameters" });
 
   connection.query(
-    `SELECT * FROM user WHERE email = '${content.email}';`,
+    `SELECT id_user, username, password, login_token FROM user WHERE email = '${content.email}';`,
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
       if (rows.length > 0) {
@@ -31,12 +32,13 @@ router.post("/login", async (req, res) => {
           content.password,
           rows[0].password,
           (err, isPasswordMatch) => {
-            if (err) return res.status(500).json({ error: err });
+            if (err) return res.status(500).json({ error: err.message });
             else {
               const returnData = !isPasswordMatch
                 ? { success: false }
                 : { success: true, userData: rows[0] };
 
+              delete returnData.userData.password;
               return res.status(200).json(returnData);
             }
           }
@@ -86,47 +88,11 @@ router.post("/register", adminVerify, async (req, res) => {
 
 router.get("/:user_id", async (req, res) => {
   connection.query(
-    `SELECT user.username, user.email, user.no_telp, user.tanggal_lahir, user.role, user.rekening, user_gambar.nama_file AS picture FROM user LEFT JOIN user_gambar ON user.id_user = user_gambar.id_user WHERE user.id_user = ${req.params.user_id}`,
+    `SELECT username, email, no_telp, tanggal_lahir, role, rekening FROM user WHERE id_user = ${req.params.user_id}`,
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
       if (rows.length < 1) return res.sendStatus(201);
       res.status(200).json(rows[0]);
-    }
-  );
-});
-
-// Admin user management routes
-router.put("/:user_id", adminVerify, async (req, res) => {
-  const content = req.body;
-  if (
-    !content.username ||
-    !content.email ||
-    !content.no_telp ||
-    !content.tanggal_lahir ||
-    !content.role ||
-    !content.rekening
-  )
-    return res
-      .status(400)
-      .json({ error: "Missing one or more required parameters" });
-
-  connection.query(
-    `UPDATE user SET username = '${content.username}', email = '${content.email}', 
-    no_telp = '${content.no_telp}', tanggal_lahir = '${content.tanggal_lahir}', role = '${content.role}', rekening = '${content.rekening}' 
-    WHERE id_user = ${req.params.user_id};`,
-    (err, rows, fields) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.sendStatus(200);
-    }
-  );
-});
-
-router.delete("/:user_id", adminVerify, async (req, res) => {
-  connection.query(
-    `DELETE FROM user WHERE id_user = ${req.params.user_id};`,
-    (err, rows, fields) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.sendStatus(200);
     }
   );
 });

@@ -2,76 +2,159 @@ const express = require("express");
 const router = express.Router();
 
 const projectOwnerVerify = require("../middlewares/projectOwnerVerify");
-const supervisorVerify = require("../middlewares/supervisorVerify");
+const userVerify = require("../middlewares/userVerify");
 
 const connection = require("../db");
 
-router.post("/assignmember", projectOwnerVerify, async (req, res) => {
+router.post("/create", userVerify, async (req, res) => {
   const content = req.body;
-  if (!content.project_id || !content.members)
+  if (!content.name || !content.company_id || !content.supervisor_id)
     return res
       .status(400)
       .json({ error: "Missing one or more required parameters" });
-  if (content.members.length <= 0)
-    return res.status(400).json({ error: "Members cannot be an empty array" });
 
-  let query = "INSERT INTO user_project (id_user, id_project) VALUES ";
-  content.members.forEach((memberID, index) => {
-    query += `(${memberID}, ${content.project_id})`;
-    if (index === content.members.length - 1) query += ";";
-    else query += ",";
-  });
+  connection.beginTransaction((err) => {
+    if (err) {
+      console.log("failed at beginning of transaction");
+      return res.status(500).json({ error: err });
+    }
 
-  connection.query(query, (err, rows, fields) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.sendStatus(200);
+    connection.query(
+      `INSERT INTO project(nama_project, nama_client, deskripsi, id_supervisor, id_instansi, status, tanggal_pembuatan, tanggal_update, id_pembuat, tanggal_mulai, tanggal_selesai) VALUES(
+      '${content.name}', '${content.client ?? ""}', '${
+        content.deskripsi ?? ""
+      }', ${content.supervisor_id}, ${
+        content.company_id
+      }, 'berjalan', NOW(), NOW(), ${res.locals.id_user}, '${
+        content.tanggal_mulai ?? ""
+      }', '${content.tanggal_selesai ?? ""}');`,
+      (err, rows, fields) => {
+        if (err) {
+          connection.rollback(() => {
+            res.status(500).json({ error: err });
+          });
+          return;
+        }
+
+        const projectId = rows.insertId;
+
+        if (content.members && content.members.length > 0) {
+          let membersQuery = "";
+          content.members.forEach((m, i) => {
+            membersQuery += `(${rows.insertId}, ${m})${
+              i === content.members.length - 1 ? ";" : ","
+            }`;
+          });
+
+          connection.query(
+            `INSERT INTO user_project(id_project, id_user) VALUES ${membersQuery}`,
+            (err, rows, fields) => {
+              if (err) {
+                console.log("failed when inserting user_project");
+                connection.rollback(() => {
+                  res.status(500).json({ error: err });
+                });
+                return;
+              }
+
+              connection.commit((err) => {
+                if (err)
+                  return connection.rollback(() => {
+                    res.status(500).json({ error: err });
+                  });
+
+                res.status(200).json({ project_id: projectId });
+              });
+            }
+          );
+        } else {
+          connection.commit((err) => {
+            if (err)
+              return connection.rollback(() => {
+                res.status(500).json({ error: err });
+              });
+
+            res.status(200).json({ project_id: projectId });
+          });
+        }
+      }
+    );
   });
 });
 
-router.post("/removemember", projectOwnerVerify, async (req, res) => {
-  const content = req.body;
-  if (!content.project_id || !content.user_id)
-    return res
-      .status(400)
-      .json({ error: "Missing one or more required parameters" });
-
+// Gets collapsed project data from a single user
+router.get("/own", userVerify, async (req, res) => {
   connection.query(
-    `DELETE FROM user_project WHERE id_project = ${content.project_id} AND id_user = ${content.user_id};`,
+    `SELECT project.id_project, project.nama_project, project.status
+    FROM user_project LEFT JOIN project ON user_project.id_project = project.id_project 
+    WHERE user_project.id_user = ${res.locals.id_user} GROUP BY project.id_project;`,
     (err, rows, fields) => {
-      if (err) return res.status(400).json({ error: err.message });
-      res.sendStatus(200);
+      if (err) return res.status(500).json({ error: err });
+      res.status(200).json(rows);
     }
   );
 });
 
-router.post("/create", supervisorVerify, async (req, res) => {
+// Gets full project data (without membets and activities)
+router.get("/details/:id_project", async (req, res) => {
+  connection.query(
+    `SELECT project.*, user.username AS nama_supervisor, instansi.nama AS nama_instansi 
+    FROM project 
+    LEFT JOIN user ON project.id_supervisor = user.id_user 
+    LEFT JOIN instansi ON project.id_instansi = instansi.id_instansi
+    WHERE project.id_project = ${req.params.id_project}`,
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err });
+      if (rows.length < 1) return res.sendStatus(201);
+      res.status(200).json(rows[0]);
+    }
+  );
+});
+
+router.get("/members/:id_project", async (req, res) => {
+  connection.query(
+    `SELECT user.id_user, user.username FROM user_project LEFT JOIN user ON user_project.id_user = user.id_user LEFT JOIN project ON user_project.id_project = project.id_project WHERE project.id_project = ${req.params.id_project};`,
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err });
+      res.status(200).json(rows);
+    }
+  );
+});
+
+router.put("/:id_project", async (req, res) => {
   const content = req.body;
   if (
     !content.nama_project ||
-    !content.nama_client ||
-    !content.departemen ||
-    !content.nomor_po ||
-    !content.deskripsi ||
-    !content.id_supervisor
+    !content.id_supervisor ||
+    !content.id_instansi ||
+    !content.status
   )
-    return res
-      .status(400)
-      .json({ error: "Missing one or more required parameters" });
+    return res.status(500).json({ error: "Missing one or more parameters" });
+
   connection.query(
-    `INSERT INTO project(nama_project, nama_client, departemen, nomor_po, deskripsi, id_supervisor) VALUES ('${content.nama_project}', '${content.nama_client}', '${content.departemen}', ${content.nomor_po}, '${content.deskripsi}', ${content.id_supervisor})`,
+    `UPDATE project SET nama_project = '${
+      content.nama_project
+    }', nama_client = '${content.nama_client ?? ""}', 
+    deskripsi = '${content.deskripsi ?? ""}', status = '${
+      content.status
+    }', id_instansi = ${content.id_instansi}, 
+    tanggal_mulai = '${content.tanggal_mulai ?? ""}', tanggal_selesai = '${
+      content.tanggal_selesai ?? ""
+    }' WHERE id_project = ${req.params.id_project};`,
     (err, rows, fields) => {
-      if (err) return res.status(400).json({ error: err.message });
-      res.status(200).json({ id_project: rows.insertId });
+      if (err) return res.status(500).json({ error: err.message });
+      res.status(200).json({ success: true });
     }
   );
 });
 
-router.get("/:user_id", async (req, res) => {
+router.delete("/:id_project", projectOwnerVerify, async (req, res) => {
+  console.log(req.params.id_project);
   connection.query(
-    `SELECT project.* FROM user_project LEFT JOIN project ON user_project.id_project = project.id_project LEFT JOIN user ON user_project.id_user = user.id_user WHERE user.id_user = ${req.params.user_id} GROUP BY project.id_project;`,
+    `DELETE FROM project WHERE id_project = ${req.params.id_project};`,
     (err, rows, fields) => {
-      if (err) res.status(500).json({ error: err.message });
-      return res.status(200).json(rows);
+      if (err) return res.status(500).json({ error: err });
+      res.status(200).json({ success: true });
     }
   );
 });
