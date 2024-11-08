@@ -5,26 +5,26 @@ const encryptUtil = require("../encryptUtil");
 const adminVerify = require("../middlewares/adminVerify");
 const connection = require("../db");
 
-router.get("/all", async (req, res) => {
+router.get("/userlist", async (req, res) => {
   connection.query(
-    `SELECT id_user, username, role FROM user;`,
+    `SELECT id_user, username FROM user;`,
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
-      else return res.status(200).json(rows);
+      res.status(200).json(rows);
     }
   );
 });
 
 router.post("/login", async (req, res) => {
   const content = req.body;
-  console.log(content);
   if (!content.email || !content.password)
     return res
       .status(400)
       .json({ error: "Missing one or more required parameters" });
 
   connection.query(
-    `SELECT id_user, username, password, login_token FROM user WHERE email = '${content.email}';`,
+    `SELECT id_user, username, role, email, no_telp, tanggal_lahir, password, login_token FROM user WHERE email = ?;`,
+    [content.email],
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
       if (rows.length > 0) {
@@ -38,12 +38,81 @@ router.post("/login", async (req, res) => {
                 ? { success: false }
                 : { success: true, userData: rows[0] };
 
-              delete returnData.userData.password;
+              if (isPasswordMatch) delete returnData.userData.password;
               return res.status(200).json(returnData);
             }
           }
         );
       }
+    }
+  );
+});
+
+router.post("/adminlogin", async (req, res) => {
+  const content = req.body;
+  if (!content.email || !content.password)
+    return res
+      .status(400)
+      .json({ error: "Missing one or more required parameters" });
+
+  connection.query(
+    `SELECT id_user, username, role, email, no_telp, tanggal_lahir, password, login_token FROM user WHERE email = ? AND role = 'admin';`,
+    [content.email],
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (rows.length > 0) {
+        encryptUtil.comparePassword(
+          content.password,
+          rows[0].password,
+          (err, isPasswordMatch) => {
+            if (err) return res.status(500).json({ error: err.message });
+            else {
+              const returnData = !isPasswordMatch
+                ? { success: false }
+                : { success: true, userData: rows[0] };
+
+              if (isPasswordMatch) delete returnData.userData.password;
+              return res.status(200).json(returnData);
+            }
+          }
+        );
+      }
+    }
+  );
+});
+
+router.post("/cookielogin", async (req, res) => {
+  const content = req.body;
+  if (!content.id_user || !content.login_token)
+    return res
+      .status(400)
+      .json({ error: "Missing one or more required parameters" });
+
+  connection.query(
+    `SELECT id_user, username, role, email, no_telp, tanggal_lahir FROM user WHERE id_user = ? AND login_token = ?;`,
+    [content.id_user, content.login_token],
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (rows.length < 1) return res.status(401).json({ success: false });
+      res.status(200).json({ success: true, userData: rows[0] });
+    }
+  );
+});
+
+router.post("/admincookielogin", async (req, res) => {
+  const content = req.body;
+  if (!content.id_user || !content.login_token)
+    return res
+      .status(400)
+      .json({ error: "Missing one or more required parameters" });
+
+  connection.query(
+    `SELECT id_user, username, role, email, no_telp, tanggal_lahir FROM user WHERE id_user = ? AND login_token = ? AND role = 'admin';`,
+    [content.id_user, content.login_token],
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (rows.length < 1) return res.status(401).json({ success: false });
+      res.status(200).json({ success: true, userData: rows[0] });
     }
   );
 });
@@ -57,7 +126,8 @@ router.post("/register", adminVerify, async (req, res) => {
     !content.no_telp ||
     !content.tanggal_lahir ||
     !content.rekening ||
-    !content.role
+    !content.role ||
+    !content.id_departemen
   )
     return res
       .status(400)
@@ -66,33 +136,83 @@ router.post("/register", adminVerify, async (req, res) => {
   encryptUtil.encryptPassword(content.password, (err, hash) => {
     if (err) return res.status(500).json({ error: "Couldnt hash password" });
     connection.query(
-      `INSERT INTO user(username, email, password, role, no_telp, tanggal_lahir, login_token, id_instansi, rekening) 
-      VALUES('${content.username}', '${content.email}', '${hash}', '${content.role}', '${content.no_telp}', '${content.tanggal_lahir}', UUID(), ${res.locals.instansi}, '${content.rekening}')`,
+      `
+       INSERT INTO user(username, password, email, no_telp, tanggal_lahir, role, login_token, rekening, id_departemen) 
+       VALUES(?, ?, ?, ?, ?, ?, UUID(), ?, ?);
+      `,
+      [
+        content.username,
+        hash,
+        content.email,
+        content.no_telp,
+        content.tanggal_lahir,
+        content.role,
+        content.rekening,
+        content.id_departemen,
+      ],
       (err, rows, fields) => {
         if (err) return res.status(500).json({ error: err.message });
-
-        const insertedId = rows.insertId;
-        connection.query(
-          `SELECT login_token FROM user WHERE id_user = ${insertedId}`,
-          (err, rows, fields) => {
-            if (err) return res.status(500).json({ error: err.message });
-            return res
-              .status(200)
-              .json({ user_id: insertedId, login_token: rows[0].login_token });
-          }
-        );
+        res.status(200).json({ success: true });
       }
     );
   });
 });
 
-router.get("/:user_id", async (req, res) => {
+router.get("/:id_user", async (req, res) => {
+  // Gets user details
   connection.query(
-    `SELECT username, email, no_telp, tanggal_lahir, role, rekening FROM user WHERE id_user = ${req.params.user_id}`,
+    `SELECT * FROM user WHERE id_user = ?`,
+    [req.params.id_user],
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
-      if (rows.length < 1) return res.sendStatus(201);
-      res.status(200).json(rows[0]);
+
+      let userData = rows[0];
+      delete userData.password;
+      delete userData.login_token;
+
+      // Gets projects included
+      connection.query(
+        `
+          SELECT project.nama_project, project.id_supervisor 
+          FROM user_project 
+          LEFT JOIN project ON user_project.id_project = project.id_project 
+          WHERE user_project.id_user = ?
+        `,
+        [req.params.id_user],
+        (err, rows, fields) => {
+          if (err) return res.status(500).json({ error: err.message });
+
+          let projects = rows;
+          projects = projects.map((p) => {
+            return {
+              nama_project: p.nama_project,
+              role:
+                p.id_supervisor == req.params.id_user
+                  ? "Project Manager"
+                  : "Member",
+            };
+          });
+
+          // Gets departments being led
+          connection.query(
+            `
+              SELECT nama_departemen FROM departemen WHERE id_leader = ?
+            `,
+            [req.params.id_user],
+            (err, rows, fields) => {
+              if (err) return res.status(500).json({ error: err.message });
+
+              let departments = rows;
+
+              res.status(200).json({
+                userData: userData,
+                projects: projects,
+                departments: departments,
+              });
+            }
+          );
+        }
+      );
     }
   );
 });

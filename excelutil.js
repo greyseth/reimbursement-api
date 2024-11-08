@@ -475,4 +475,150 @@ function createWorksheet(request) {
   return workbook;
 }
 
-module.exports = { createWorksheet };
+function createReport(data, rangeType, param1, param2) {
+  /* 
+  
+    Data format: [
+      {
+        id_request: 0,
+        judul: "This is a request name",
+        username: "James",
+        tanggal_request: "2024-11-06",
+        harga: 100000,
+        jumlah: 3,
+        project: "Create an application",
+        metode_pembayaran: "cash",
+        status: "PENDING",
+      },
+    ]
+  
+  */
+
+  let workbook = new excel.Workbook();
+  let ws = workbook.addWorksheet("Export Report Reimbursement");
+
+  const columns = [
+    {
+      width: 195,
+      label: "Tanggal Request",
+      key: "tanggal_request",
+    },
+    {
+      width: 320,
+      label: "Judul Request",
+      key: "judul",
+    },
+    {
+      width: 204,
+      label: "Nama Requestor",
+      key: "username",
+    },
+    {
+      width: 195,
+      label: "Total Harga",
+      key: "harga",
+    },
+    {
+      width: 225,
+      label: "Project",
+      key: "project",
+    },
+    {
+      width: 256,
+      label: "Supervisor Approval",
+      key: "supervisor_status",
+    },
+    {
+      width: 256,
+      label: "Finance Approval",
+      key: "finance_status",
+    },
+    {
+      width: 256,
+      label: "Realisasi Approval",
+      key: "realisasi_status",
+    },
+  ];
+
+  // Column sizes
+  columns.forEach((col, i) => ws.column(2 + i).setWidth(col.width / 10));
+
+  // Sheet Header
+  ws.cell(2, 2, 3, columns.length + 1, true)
+    .string(
+      rangeType === "month"
+        ? `REKAP PENGELUARAN REIMBURSEMENT BULAN ${
+            months[param1 - 1]
+          } ${param2}`
+        : `REKAP PENGELUARAN REIMBURSEMENT TANGGAL ${param1} - ${param2}`
+    )
+    .style({
+      border: {
+        top: { color: "black", style: "medium" },
+        bottom: { color: "black", style: "medium" },
+        left: { color: "black", style: "medium" },
+        right: { color: "black", style: "medium" },
+      },
+      font: { bold: true },
+      alignment: { horizontal: "center", vertical: "center" },
+    });
+
+  // Column Names
+  columns.forEach((col, i) => {
+    ws.cell(5, 2 + i)
+      .string(col.label)
+      .style({
+        fill: { type: "pattern", patternType: "solid", fgColor: "ffc000" },
+        font: { bold: true },
+        border: { bottom: { color: "black", style: "medium" } },
+        alignment: { horizontal: "center" },
+      });
+  });
+
+  // Request Content
+  data.forEach((d, y) =>
+    columns.forEach((c, x) => {
+      let cellStyle = {
+        alignment: { horizontal: "center" },
+      };
+
+      let cellContent = d[c.key];
+
+      if (c.key.endsWith("status")) {
+        let color = "ffc000";
+        cellContent = "-";
+
+        if (d[c.key] !== null && d[c.key]) {
+          color = "74e893";
+          cellContent = `TERIMA (${d[c.key + "_user"]})`;
+        } else if (d[c.key] !== null && !d[c.key]) {
+          color = "e82525";
+          cellContent = `TOLAK (${d[c.key + "_user"]})`;
+        }
+
+        cellStyle.fill = {
+          type: "pattern",
+          patternType: "solid",
+          fgColor: color,
+        };
+      }
+
+      switch (typeof cellContent) {
+        case "string":
+          ws.cell(6 + y, 2 + x)
+            .string(cellContent)
+            .style(cellStyle);
+          break;
+        case "number":
+          ws.cell(6 + y, 2 + x)
+            .number(cellContent)
+            .style(cellStyle);
+          break;
+      }
+    })
+  );
+
+  return workbook;
+}
+
+module.exports = { createWorksheet, createReport };

@@ -2,7 +2,8 @@ const connection = require("../db");
 
 module.exports = (req, res, next) => {
   connection.query(
-    `SELECT id_user, role FROM user WHERE login_token = '${req.headers.account_token}';`,
+    `SELECT id_user, role FROM user WHERE login_token = ?;`,
+    [req.headers.account_token],
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
       if (rows.length < 1)

@@ -21,13 +21,16 @@ router.post("/create", userVerify, async (req, res) => {
 
     connection.query(
       `INSERT INTO project(nama_project, nama_client, deskripsi, id_supervisor, id_instansi, status, tanggal_pembuatan, tanggal_update, id_pembuat, tanggal_mulai, tanggal_selesai) VALUES(
-      '${content.name}', '${content.client ?? ""}', '${
-        content.deskripsi ?? ""
-      }', ${content.supervisor_id}, ${
-        content.company_id
-      }, 'berjalan', NOW(), NOW(), ${res.locals.id_user}, '${
-        content.tanggal_mulai ?? ""
-      }', '${content.tanggal_selesai ?? ""}');`,
+      ?, ?, ?, ?, ?, 'berjalan', NOW(), NOW(), ${res.locals.id_user}, ?, ?);`,
+      [
+        content.name,
+        content.client ?? "",
+        content.deskripsi ?? "",
+        content.supervisor_id,
+        content.company_id,
+        content.tanggal_mulai,
+        content.tanggal_selesai,
+      ],
       (err, rows, fields) => {
         if (err) {
           connection.rollback(() => {
@@ -45,6 +48,9 @@ router.post("/create", userVerify, async (req, res) => {
               i === content.members.length - 1 ? ";" : ","
             }`;
           });
+
+          if (!content.members.includes(content.supervisor_id))
+            membersQuery += `(${rows.insertId}, ${content.supervisor_id})`;
 
           connection.query(
             `INSERT INTO user_project(id_project, id_user) VALUES ${membersQuery}`,
@@ -82,11 +88,55 @@ router.post("/create", userVerify, async (req, res) => {
   });
 });
 
+const analysisRoleCheck = (req, res, next) => {
+  connection.query(
+    `SELECT role FROM user WHERE login_token = ?`,
+    [req.headers.account_token],
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (rows.length < 1)
+        return res.status(401).json({ error: "Invalid account token" });
+      if (rows[0].role !== "finance" && rows[0].role !== "realisasi")
+        return res.status(401).json({ error: "Unauthorized access" });
+
+      next();
+    }
+  );
+};
+router.get("/all/:search", analysisRoleCheck, (req, res) => {
+  connection.query(
+    `
+      SELECT
+      project.id_project, project.nama_project, project.deskripsi, project.tanggal_mulai, project.tanggal_selesai, 
+      user.username AS supervisor, instansi.nama AS instansi, project.status
+      FROM user_project 
+      LEFT JOIN project ON user_project.id_project = project.id_project 
+      LEFT JOIN user ON project.id_supervisor = user.id_user 
+      LEFT JOIN instansi ON project.id_instansi = instansi.id_instansi 
+      WHERE LOWER(project.nama_project) LIKE ? OR LOWER(project.deskripsi) LIKE ?
+      GROUP BY project.id_project
+    `,
+    [
+      "%" + req.params.search.toLowerCase() + "%",
+      "%" + req.params.search.toLowerCase() + "%",
+    ],
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.status(200).json(rows);
+    }
+  );
+});
+
 // Gets collapsed project data from a single user
 router.get("/own", userVerify, async (req, res) => {
   connection.query(
-    `SELECT project.id_project, project.nama_project, project.status
-    FROM user_project LEFT JOIN project ON user_project.id_project = project.id_project 
+    `SELECT 
+    project.id_project, project.nama_project, project.deskripsi, project.tanggal_mulai, project.tanggal_selesai, 
+    user.username AS supervisor, instansi.nama AS instansi, project.status
+    FROM user_project 
+    LEFT JOIN project ON user_project.id_project = project.id_project 
+    LEFT JOIN user ON project.id_supervisor = user.id_user 
+    LEFT JOIN instansi ON project.id_instansi = instansi.id_instansi 
     WHERE user_project.id_user = ${res.locals.id_user} GROUP BY project.id_project;`,
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err });
@@ -113,7 +163,15 @@ router.get("/details/:id_project", async (req, res) => {
 
 router.get("/members/:id_project", async (req, res) => {
   connection.query(
-    `SELECT user.id_user, user.username FROM user_project LEFT JOIN user ON user_project.id_user = user.id_user LEFT JOIN project ON user_project.id_project = project.id_project WHERE project.id_project = ${req.params.id_project};`,
+    `
+    SELECT user.id_user, user.username, project_role.nama_role 
+    FROM user_project 
+    LEFT JOIN user ON user_project.id_user = user.id_user 
+    LEFT JOIN project ON user_project.id_project = project.id_project 
+    LEFT JOIN project_user_role ON project_user_role.id_project = project.id_project AND id_user = user.id_user
+    LEFT JOIN project_role ON project_role.id_project_role = project_user_role.id_project_role 
+    WHERE project.id_project = ?`,
+    [req.params.id_project],
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err });
       res.status(200).json(rows);
@@ -157,6 +215,96 @@ router.delete("/:id_project", projectOwnerVerify, async (req, res) => {
       res.status(200).json({ success: true });
     }
   );
+});
+
+// Project roles functions
+router.get("/roles/:id_project", async (req, res) => {
+  connection.query(
+    `
+    SELECT * FROM project_role WHERE id_project = ? AND active = TRUE
+    `,
+    [req.params.id_project],
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.status(200).json(rows);
+    }
+  );
+});
+
+router.post("/roles/:id_project", async (req, res) => {
+  if (!req.body.nama_role)
+    return res.status(400).json({ error: "Missing nama_role parameter" });
+  connection.query(
+    `INSERT INTO project_role(nama_role, id_project) VALUES(?, ?);`,
+    [req.params.id_project, req.body.nama_role],
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.status(200).json({ success: true });
+    }
+  );
+});
+
+router.delete("/roles/:id_project_role", async (req, res) => {
+  // Performs check to ensure no more users have that role
+  connection.query(
+    `
+    SELECT COUNT(project_user_role.id_user) AS user_count FROM project_role 
+    LEFT JOIN project_user_role ON project_user_role.id_project_role = ? WHERE project_role.id_project_role = ?
+    `,
+    [req.params.id_project_role, req.params.id_project_role],
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (rows[0].user_count > 0)
+        return res
+          .status(400)
+          .json({ error: "Cannot delete role with users assigned" });
+
+      // Deletes the role
+      connection.query(
+        `DELETE FROM project_role WHERE id_project_role = ?`,
+        [req.params.id_project_role],
+        (err, rows, fields) => {
+          if (err) return res.status(500).json({ error: err.message });
+          res.status(200).json({ success: true });
+        }
+      );
+    }
+  );
+});
+
+router.put("/roles/assign/:id_project_role", async (req, res) => {
+  const content = req.body;
+  if (!content.members || content.members.length === 0)
+    return res.status(400).json({ error: "Members parameter cannot be empty" });
+
+  connection.beginTransaction((err) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    // Removes all previous members with this role
+    connection.query(
+      `
+      DELETE FROM project_user_role WHERE id_project = ?
+      `,
+      [req.params.id_project_role],
+      (err, rows, fields) => {
+        if (err) return res.status(500).json({ error: err.message });
+
+        // Inserts new members
+        let newMembers = [];
+        content.members.forEach((m) => {
+          newMembers.add([req.params.id_project_role, m]);
+        });
+        connection.query(
+          `INSERT INTO project_user_role(id_project_role, id_user) VALUES ?`,
+          [newMembers],
+          (err, rows, fields) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.status(200).json({ success: true });
+          }
+        );
+      }
+    );
+  });
 });
 
 module.exports = router;
