@@ -887,46 +887,36 @@ async function getRequestData(req) {
                     - nama leader
     */
 
-    /*
-      man
-      what have i done
-      she hates me now
-      i miss her so much but she fucking hates me
-      god dammit
-      why am i so stupid
-      i hate myself
-    */
-
     // TODO-done: Change this request to get values based on most recent updates asdjsaoidnas;dusajdasjdoasdj;
     connection.query(
       `
       SELECT 
-      request.*, 
-      owner.username AS owner_username, owner.rekening AS owner_rekening, 
-      instansi.nama AS instansi_nama, instansi.alamat AS instansi_alamat, 
-      s_app.id_approval AS s_app_id, s_app.diterima AS s_app_diterima, s_app.catatan AS s_app_catatan, s_app.tanggal_approval AS s_app_tanggal_approval, 
-      s_app_user.username AS s_app_username, 
-      f_app.id_approval AS f_app_id, f_app.diterima AS f_app_diterima, f_app.catatan AS f_app_catatan, f_app.tanggal_approval AS f_app_tanggal_approval, 
-      f_app_user.username AS f_app_username, 
-      r_app.id_approval AS r_app_id, r_app.diterima AS r_app_diterima, r_app.catatan AS r_app_catatan, r_app.tanggal_approval AS r_app_tanggal_approval,
-      r_app_user.username AS r_app_username,
-      project.id_project AS project_id, project.nama_project AS project_nama, project.nama_client AS project_client, 
-      project_pm.username AS project_username, 
-      departemen.nama_departemen AS departemen_nama,
-      departemen_leader.id_user AS departemen_id_user, departemen_leader.username AS departemen_username 
+        request.*, 
+        owner.username AS owner_username, owner.rekening AS owner_rekening, 
+        instansi.nama AS instansi_nama, instansi.alamat AS instansi_alamat, 
+        s_app.id_approval AS s_app_id, s_app.diterima AS s_app_diterima, s_app.catatan AS s_app_catatan, s_app.tanggal_approval AS s_app_tanggal_approval, 
+        s_app_user.username AS s_app_username, 
+        f_app.id_approval AS f_app_id, f_app.diterima AS f_app_diterima, f_app.catatan AS f_app_catatan, f_app.tanggal_approval AS f_app_tanggal_approval, 
+        f_app_user.username AS f_app_username, 
+        r_app.id_approval AS r_app_id, r_app.diterima AS r_app_diterima, r_app.catatan AS r_app_catatan, r_app.tanggal_approval AS r_app_tanggal_approval,
+        r_app_user.username AS r_app_username,
+        project.id_project AS project_id, project.nama_project AS project_nama, project.nama_client AS project_client, 
+        project_pm.username AS project_username, 
+        departemen.nama_departemen AS departemen_nama,
+        departemen_leader.id_user AS departemen_id_user, departemen_leader.username AS departemen_username 
       FROM request 
-      LEFT JOIN user owner ON request.id_user = owner.id_user       
-      LEFT JOIN approval s_app ON request.id_request = s_app.id_request AND s_app.type = 'supervisor' AND s_app.version = request.current_version 
-      LEFT JOIN user s_app_user ON s_app.id_approver = s_app_user.id_user 
-      LEFT JOIN approval f_app ON request.id_request = f_app.id_request AND f_app.type = 'finance' AND f_app.version = request.current_version 
-      LEFT JOIN user f_app_user ON f_app.id_approver = f_app_user.id_user 
-      LEFT JOIN approval r_app ON request.id_request = r_app.id_request AND r_app.type = 'Realisasi' AND r_app.version = request.current_version
-      LEFT JOIN user r_app_user ON r_app.id_approver = r_app_user.id_user 
-      LEFT JOIN project ON request.id_project = project.id_project 
-      LEFT JOIN instansi ON request.id_instansi = instansi.id_instansi OR project.id_instansi = instansi.id_instansi
-      LEFT JOIN user project_pm ON project.id_supervisor = project_pm.id_user 
-      LEFT JOIN departemen ON departemen.id_departemen = owner.id_departemen 
-      LEFT JOIN user departemen_leader ON departemen.id_leader = departemen_leader.id_user 
+        LEFT JOIN user owner ON request.id_user = owner.id_user       
+        LEFT JOIN approval s_app ON request.id_request = s_app.id_request AND s_app.type = 'supervisor' AND s_app.version = request.current_version 
+        LEFT JOIN user s_app_user ON s_app.id_approver = s_app_user.id_user 
+        LEFT JOIN approval f_app ON request.id_request = f_app.id_request AND f_app.type = 'finance' AND f_app.version = request.current_version 
+        LEFT JOIN user f_app_user ON f_app.id_approver = f_app_user.id_user 
+        LEFT JOIN approval r_app ON request.id_request = r_app.id_request AND r_app.type = 'realisasi' AND r_app.version = request.current_version
+        LEFT JOIN user r_app_user ON r_app.id_approver = r_app_user.id_user 
+        LEFT JOIN project ON request.id_project = project.id_project 
+        LEFT JOIN instansi ON request.id_instansi = instansi.id_instansi OR project.id_instansi = instansi.id_instansi
+        LEFT JOIN user project_pm ON project.id_supervisor = project_pm.id_user 
+        LEFT JOIN departemen ON departemen.id_departemen = owner.id_departemen 
+        LEFT JOIN user departemen_leader ON departemen.id_leader = departemen_leader.id_user 
       WHERE request.id_request = ?
       GROUP BY request.id_request;
       `,

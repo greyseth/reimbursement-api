@@ -131,8 +131,8 @@ router.get("/all/:search", analysisRoleCheck, (req, res) => {
 router.get("/own", userVerify, async (req, res) => {
   connection.query(
     `SELECT 
-    project.id_project, project.nama_project, project.deskripsi, project.tanggal_mulai, project.tanggal_selesai, 
-    user.username AS supervisor, instansi.nama AS instansi, project.status
+    project.id_project, project.nama_project, project.deskripsi, project.nama_client, project.tanggal_mulai, project.tanggal_selesai, 
+    user.id_user AS id_supervisor, user.username AS supervisor, instansi.id_instansi, instansi.nama AS instansi, project.status
     FROM user_project 
     LEFT JOIN project ON user_project.id_project = project.id_project 
     LEFT JOIN user ON project.id_supervisor = user.id_user 
@@ -179,7 +179,21 @@ router.get("/members/:id_project", async (req, res) => {
   );
 });
 
-router.put("/:id_project", async (req, res) => {
+const supervisorCheck = (req, res, next) => {
+  connection.query(
+    `
+    SELECT project.id_project FROM project LEFT JOIN user ON user.id_user = project.id_supervisor WHERE project.id_project = ? AND user.login_token = ?
+    `,
+    [req.params.id_project, req.headers.account_token],
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (rows.length > 0) next();
+      else res.status(401).json({ error: "Unauthorized access" });
+    }
+  );
+};
+
+router.put("/:id_project", supervisorCheck, async (req, res) => {
   const content = req.body;
   if (
     !content.nama_project ||
@@ -190,15 +204,25 @@ router.put("/:id_project", async (req, res) => {
     return res.status(500).json({ error: "Missing one or more parameters" });
 
   connection.query(
-    `UPDATE project SET nama_project = '${
-      content.nama_project
-    }', nama_client = '${content.nama_client ?? ""}', 
-    deskripsi = '${content.deskripsi ?? ""}', status = '${
-      content.status
-    }', id_instansi = ${content.id_instansi}, 
-    tanggal_mulai = '${content.tanggal_mulai ?? ""}', tanggal_selesai = '${
-      content.tanggal_selesai ?? ""
-    }' WHERE id_project = ${req.params.id_project};`,
+    `UPDATE project SET 
+    nama_project = ?, 
+    nama_client = ?, 
+    deskripsi = ?, 
+    status = ?, 
+    id_instansi = ?, 
+    tanggal_mulai = ?, 
+    tanggal_selesai = ? 
+    WHERE id_project = ?;`,
+    [
+      content.nama_project,
+      content.nama_client ?? "",
+      content.deskripsi ?? "",
+      content.status,
+      content.id_instansi,
+      content.tanggal_mulai,
+      content.tanggal_selesai,
+      req.params.id_project,
+    ],
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
       res.status(200).json({ success: true });

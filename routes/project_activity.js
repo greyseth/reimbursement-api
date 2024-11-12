@@ -35,21 +35,25 @@ const projectMemberVerify = (req, res, next) => {
 // Create
 router.post("/create", projectMemberVerify, async (req, res) => {
   const content = req.body;
-  if (!content.column_id || !content.title)
+  if (!content.column_id || !content.title || !content.id_project)
     return res
       .status(400)
       .json({ error: "Missing column_id and/or title parameters" });
 
   connection.query(
     `INSERT INTO project_activity(column_id, importance, title, description, id_project, creator_id) 
-      VALUES(${content.column_id}, ${content.importance ?? 0}, '${
-      content.title
-    }', '${content.description ?? ""}', ${content.id_project}, ${
-      res.locals.id_user
-    })`,
+      VALUES(?, ?, ?, ?, ?, ?)`,
+    [
+      content.column_id,
+      content.importance ?? 0,
+      content.title,
+      content.description,
+      content.id_project,
+      res.locals.id_user,
+    ],
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
-      res.status(200).json({ success: true });
+      res.status(200).json({ success: true, item_id: rows.insertId });
     }
   );
 });
@@ -63,23 +67,86 @@ router.post("/create/task", projectMemberVerify, async (req, res) => {
 
   connection.query(
     `INSERT INTO project_activity_task(item_id, content, done) 
-    VALUES(${content.item_id}, '${content.content}', ${
-      content.done ? "TRUE" : "FALSE"
-    });`,
+    VALUES(?, ?, ?);`,
+    [content.item_id, content.content, content.done ? 1 : 0],
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
-      return res.status(200).json({ success: true });
+      return res.status(200).json({ success: true, task_id: rows.insertId });
     }
   );
+});
+
+router.post("/create/member", projectMemberVerify, async (req, res) => {
+  const content = req.body;
+  if (!content.item_id || !content.id_user)
+    return res
+      .status(400)
+      .json({ error: "Missing one or more required parameters" });
+
+  connection.beginTransaction((err) => {
+    if (err) return res.status(500).json({ error: err });
+
+    // Checks if user is already in activity
+    connection.query(
+      `SELECT * FROM project_activity_member WHERE id_user = ? AND item_id = ?`,
+      [content.id_user, content.item_id],
+      (err, rows, fields) => {
+        if (err) return res.status(500).json({ error: err });
+        if (rows.length > 0)
+          return res.status(401).json({ error: "User is already included" });
+
+        // Inserts new record if not
+        connection.query(
+          `INSERT INTO project_activity_member(id_user, item_id) VALUES(?, ?)`,
+          [content.id_user, content.item_id],
+          (err, rows, fields) => {
+            if (err) return res.status(500).json({ error: err });
+            res.status(200).json({ success: true });
+          }
+        );
+      }
+    );
+  });
 });
 
 // Read
 router.get("/get/:id_project", async (req, res) => {
   connection.query(
-    `SELECT * FROM project_activity WHERE id_project = ${req.params.id_project};`,
+    `
+      SELECT project_activity.*, 
+      COUNT(DISTINCT project_activity_member.id_user) AS members, 
+      COUNT(DISTINCT project_activity_task.task_id) AS tasks
+      FROM project_activity 
+      LEFT JOIN project_activity_member ON project_activity_member.item_id = project_activity.item_id
+      LEFT JOIN project_activity_task ON project_activity_task.item_id = project_activity.item_id
+      WHERE project_activity.id_project = ?
+      GROUP BY project_activity.item_id;
+    `,
+    [req.params.id_project],
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
       res.status(200).json(rows);
+    }
+  );
+});
+
+router.get("/count/:project_id", async (req, res) => {
+  connection.query(
+    `
+      SELECT
+      COUNT(CASE WHEN column_id = 1 THEN 1 END) AS opportunity,
+      COUNT(CASE WHEN column_id = 2 THEN 1 END) AS wip,
+      COUNT(CASE WHEN column_id = 3 THEN 1 END) AS pending_payment,
+      COUNT(CASE WHEN column_id = 4 THEN 1 END) AS done
+      FROM project_activity
+      WHERE id_project = ? GROUP BY id_project
+    `,
+    [req.params.project_id],
+    (err, rows, fields) => {
+      if (err) return res.status(500).json({ error: err });
+      if (rows.length < 1)
+        return res.status(400).json({ error: "Project id not found" });
+      res.status(200).json(rows[0]);
     }
   );
 });
@@ -157,11 +224,16 @@ router.put("/update/:item_id", projectMemberVerify, async (req, res) => {
       .json({ error: "Missing one or more required parameters" });
 
   connection.query(
-    `UPDATE project_activity SET column_id = ${
-      content.column_id
-    }, importance = ${content.importance}, 
-    title = '${content.title}', description = '${content.description ?? ""}' 
-    WHERE item_id = ${req.params.item_id};`,
+    `UPDATE project_activity SET column_id = ?, importance = ?, 
+    title = ?, description = ? 
+    WHERE item_id = ?`,
+    [
+      content.column_id,
+      content.importance,
+      content.title,
+      content.description,
+      req.params.item_id,
+    ],
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
       res.status(200).json({ success: true });
@@ -170,15 +242,9 @@ router.put("/update/:item_id", projectMemberVerify, async (req, res) => {
 });
 
 router.put("/tasks/:task_id", projectMemberVerify, async (req, res) => {
-  console.log(
-    `UPDATE project_activity_task SET done = ${
-      req.body.done ? "TRUE" : "FALSE"
-    } WHERE task_id = ${req.params.task_id};`
-  );
   connection.query(
-    `UPDATE project_activity_task SET done = ${
-      req.body.done ? "TRUE" : "FALSE"
-    } WHERE task_id = ${req.params.task_id};`,
+    `UPDATE project_activity_task SET done = ? WHERE task_id = ?`,
+    [req.body.done ? 1 : 0, req.params.task_id],
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
       res.status(200).json({ success: true });
@@ -186,55 +252,65 @@ router.put("/tasks/:task_id", projectMemberVerify, async (req, res) => {
   );
 });
 
-router.put("/members", projectMemberVerify, async (req, res) => {
-  const content = req.body;
-  if (!content.item_id || !content.members)
-    return res
-      .status(400)
-      .json({ error: "Missing one or more required parameters" });
+// router.put("/members/:item_id", projectMemberVerify, async (req, res) => {
+//   const content = req.body;
+//   if (!content.members)
+//     return res
+//       .status(400)
+//       .json({ error: "Missing one or more required parameters" });
 
-  if (content.members.length < 1)
-    return res.status(400).json({ error: "Members parameter cannot be empty" });
+//   if (content.members.length < 1)
+//     return res.status(400).json({ error: "Members parameter cannot be empty" });
 
-  connection.beginTransaction((err) => {
-    if (err) return res.status(500).json({ error: err.message });
+//   connection.beginTransaction((err) => {
+//     if (err) return res.status(500).json({ error: err.message });
 
-    connection.query(
-      `DELETE FROM project_activity_member WHERE item_id = ${content.item_id};`,
-      (err, rows, fields) => {
-        if (err)
-          return connection.rollback(() =>
-            res.status(400).json({ error: err.message })
-          );
+//     connection.query(
+//       `DELETE FROM project_activity_member WHERE item_id = ?`,
+//       [req.params.item_id],
+//       (err, rows, fields) => {
+//         if (err)
+//           return connection.rollback(() =>
+//             res.status(400).json({ error: err.message })
+//           );
 
-        let insertQuery =
-          "INSERT INTO project_activity_member(id_user, item_id) VALUES";
-        content.members.forEach((m, i) => {
-          insertQuery += `(${m}, ${content.item_id})${
-            i === content.members.length - 1 ? ";" : ","
-          }`;
-        });
+//         // let insertQuery =
+//         //   "INSERT INTO project_activity_member(id_user, item_id) VALUES";
+//         // content.members.forEach((m, i) => {
+//         //   insertQuery += `(${m}, ${content.item_id})${
+//         //     i === content.members.length - 1 ? ";" : ","
+//         //   }`;
+//         // });
 
-        connection.query(insertQuery, (err, rows, fields) => {
-          if (err)
-            return connection.rollback(() =>
-              res.status(500).json({ error: err.message })
-            );
+//         let membersInsert = content.members.map((m) => {
+//           [m.id_user, req.params.item_id];
+//         });
 
-          connection.commit((err) => {
-            if (err) return res.status(400).json({ error: err.message });
-            res.status(200).json({ success: true });
-          });
-        });
-      }
-    );
-  });
-});
+//         connection.query(
+//           `INSERT INTO project_activity_member(id_user, item_id) VALUES ?`,
+//           [membersInsert],
+//           (err, rows, fields) => {
+//             if (err)
+//               return connection.rollback(() =>
+//                 res.status(500).json({ error: err.message })
+//               );
+
+//             connection.commit((err) => {
+//               if (err) return res.status(400).json({ error: err.message });
+//               res.status(200).json({ success: true });
+//             });
+//           }
+//         );
+//       }
+//     );
+//   });
+// });
 
 // Delete
 router.delete("/:item_id", projectMemberVerify, async (req, res) => {
   connection.query(
-    `DELETE FROM project_activity WHERE item_id = ${req.params.item_id};`,
+    `DELETE FROM project_activity WHERE item_id = ?`,
+    [req.params.item_id],
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
       res.status(200).json({ success: true });
@@ -244,12 +320,28 @@ router.delete("/:item_id", projectMemberVerify, async (req, res) => {
 
 router.delete("/task/:task_id", projectMemberVerify, async (req, res) => {
   connection.query(
-    `DELETE FROM project_activity_task WHERE task_id = ${req.params.task_id};`,
+    `DELETE FROM project_activity_task WHERE task_id = ?`,
+    [req.params.task_id],
     (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
       res.status(200).json({ success: true });
     }
   );
 });
+
+router.delete(
+  "/:item_id/member/:id_user",
+  projectMemberVerify,
+  async (req, res) => {
+    connection.query(
+      `DELETE FROM project_activity_member WHERE item_id = ? AND id_user = ?`,
+      [req.params.item_id, req.params.id_user],
+      (err, rows, fields) => {
+        if (err) return res.status(500).json({ error: err });
+        res.status(200).json({ success: true });
+      }
+    );
+  }
+);
 
 module.exports = router;
