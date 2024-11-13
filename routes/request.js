@@ -21,100 +21,119 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 const arrayUpload = upload.array("images");
 
-router.post("/add", requestCreateVerify, async (req, res) => {
+router.post("/add", async (req, res) => {
   arrayUpload(req, res, (err) => {
     if (err) return res.status(500).json({ error: err.message });
 
-    const content = req.body;
-    if (
-      !content.metode_pembayaran ||
-      !content.judul ||
-      !content.deskripsi ||
-      !content.pengeluaran ||
-      content.pengeluaran.length < 1
-    )
-      return res
-        .status(400)
-        .json({ error: "Missing one or more required parameters" });
+    let query = "";
 
-    connection.beginTransaction((err) => {
+    if (req.body.id_project !== undefined)
+      query = `SELECT user.id_user, project.id_supervisor, project.id_instansi FROM user LEFT JOIN project ON project.id_project = ${req.body.id_project} WHERE user.login_token = '${req.headers.account_token}';`;
+    else
+      query = `SELECT user.id_user, departemen.id_leader FROM user LEFT JOIN departemen ON departemen.id_departemen = user.id_departemen WHERE user.login_token = '${req.headers.account_token}';`;
+
+    connection.query(query, (err, rows, fields) => {
       if (err) return res.status(500).json({ error: err.message });
+      if (rows.length < 1)
+        return res.status(401).json({ error: "Invalid token" });
 
-      // Inserts base request data
-      connection.query(
-        `
+      const check = rows[0];
+      console.log(check);
+
+      const isSupervisor = check.id_user === check.id_supervisor;
+      const isDepartmentLeader = check.id_user === check.id_leader;
+
+      let id_user = check.id_user;
+      let id_instansi = check.id_instansi;
+
+      const content = req.body;
+      if (!content.metode_pembayaran || !content.judul || !content.pengeluaran)
+        return res
+          .status(400)
+          .json({ error: "Missing one or more required parameters" });
+
+      connection.beginTransaction((err) => {
+        if (err) return res.status(500).json({ error: err.message });
+
+        // Inserts base request data
+        connection.query(
+          `
         INSERT INTO request(id_user, judul, deskripsi, metode_pembayaran, id_project, id_instansi, tanggal_request) 
-        VALUES(${res.locals.id_user}, ?, ?, ?, ?, ?, NOW())
+        VALUES(${id_user}, ?, ?, ?, ?, ?, NOW())
         `,
-        [
-          content.judul,
-          content.deskripsi ?? "",
-          content.metode_pembayaran,
-          content.id_project,
-          content.id_instansi ?? res.locals.id_instansi,
-        ],
-        (err, rows, fields) => {
-          if (err)
-            return connection.rollback(() =>
-              res.status(500).json({ error: err.message })
-            );
+          [
+            content.judul,
+            content.deskripsi ?? "",
+            content.metode_pembayaran,
+            content.id_project,
+            content.id_instansi ?? id_instansi,
+          ],
+          (err, rows, fields) => {
+            if (err)
+              return connection.rollback(() =>
+                res.status(500).json({ error: err.message })
+              );
 
-          let insertId = rows.insertId;
+            let insertId = rows.insertId;
 
-          // Inserts pengeluaran
-          let pengeluaranItems = [];
-          JSON.parse(content.pengeluaran).forEach((p, i) => {
-            pengeluaranItems.push([
-              insertId,
-              p.deskripsi,
-              p.harga,
-              p.tanggal_pembelian,
-              req.files[i].filename,
-              1,
-            ]);
-          });
-          connection.query(
-            `INSERT INTO pengeluaran(id_request, deskripsi, harga, tanggal_pembelian, image, version) VALUES ?`,
-            [pengeluaranItems],
-            (err, rows, fields) => {
-              if (err)
-                return connection.rollback(() =>
-                  res
-                    .status(500)
-                    .json({ error: "PENGELUARAN INSERT ERROR: " + err.message })
-                );
+            // Inserts pengeluaran
+            let pengeluaranItems = [];
+            JSON.parse(content.pengeluaran).forEach((p, i) => {
+              pengeluaranItems.push([
+                insertId,
+                p.deskripsi,
+                p.harga,
+                p.tanggal_pembelian,
+                req.files[i].filename,
+                1,
+              ]);
+            });
+            connection.query(
+              `INSERT INTO pengeluaran(id_request, deskripsi, harga, tanggal_pembelian, image, version) VALUES ?`,
+              [pengeluaranItems],
+              (err, rows, fields) => {
+                if (err)
+                  return connection.rollback(() =>
+                    res.status(500).json({
+                      error: "PENGELUARAN INSERT ERROR: " + err.message,
+                    })
+                  );
 
-              if (res.locals.isSupervisor || res.locals.isDepartmentLeader) {
-                // Creates deafult approval if project manager or department leader
-                connection.query(
-                  `INSERT INTO approval(id_request, tanggal_approval, diterima, id_approver, type) 
-              VALUES(${insertId}, NOW(), TRUE, ${res.locals.id_user}, 'supervisor');`,
-                  (err, rows, fields) => {
-                    if (err)
-                      return connection.rollback(() =>
-                        res.status(500).json({
-                          error: "DEFAULT APPROVAL ERROR: " + err.message,
-                        })
-                      );
-
-                    connection.commit((err) => {
+                if (isSupervisor || isDepartmentLeader) {
+                  // Creates deafult approval if project manager or department leader
+                  connection.query(
+                    `INSERT INTO approval(id_request, tanggal_approval, diterima, id_approver, type, version) 
+              VALUES(${insertId}, NOW(), TRUE, ${id_user}, 'supervisor', 1);`,
+                    (err, rows, fields) => {
                       if (err)
-                        return res.status(500).json({ error: err.message });
-                      res
-                        .status(200)
-                        .json({ success: true, id_request: insertId });
-                    });
-                  }
-                );
-              } else
-                connection.commit((err) => {
-                  if (err) return res.status(500).json({ error: err.message });
-                  res.status(200).json({ success: true, id_request: insertId });
-                });
-            }
-          );
-        }
-      );
+                        return connection.rollback(() =>
+                          res.status(500).json({
+                            error: "DEFAULT APPROVAL ERROR: " + err.message,
+                          })
+                        );
+
+                      connection.commit((err) => {
+                        if (err)
+                          return res.status(500).json({ error: err.message });
+                        res
+                          .status(200)
+                          .json({ success: true, id_request: insertId });
+                      });
+                    }
+                  );
+                } else
+                  connection.commit((err) => {
+                    if (err)
+                      return res.status(500).json({ error: err.message });
+                    res
+                      .status(200)
+                      .json({ success: true, id_request: insertId });
+                  });
+              }
+            );
+          }
+        );
+      });
     });
   });
 });
