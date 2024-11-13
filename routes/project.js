@@ -42,18 +42,13 @@ router.post("/create", userVerify, async (req, res) => {
         const projectId = rows.insertId;
 
         if (content.members && content.members.length > 0) {
-          let membersQuery = "";
-          content.members.forEach((m, i) => {
-            membersQuery += `(${rows.insertId}, ${m})${
-              i === content.members.length - 1 ? ";" : ","
-            }`;
-          });
-
+          const membersInsert = content.members.map((m) => [rows.insertId, m]);
           if (!content.members.includes(content.supervisor_id))
-            membersQuery += `(${rows.insertId}, ${content.supervisor_id})`;
+            membersInsert.push([rows.insertId, content.supervisor_id]);
 
           connection.query(
-            `INSERT INTO user_project(id_project, id_user) VALUES ${membersQuery}`,
+            `INSERT INTO user_project(id_project, id_user) VALUES ?`,
+            [membersInsert],
             (err, rows, fields) => {
               if (err) {
                 console.log("failed when inserting user_project");
@@ -164,12 +159,10 @@ router.get("/details/:id_project", async (req, res) => {
 router.get("/members/:id_project", async (req, res) => {
   connection.query(
     `
-    SELECT user.id_user, user.username, project_role.nama_role 
+    SELECT user.id_user, user.username
     FROM user_project 
     LEFT JOIN user ON user_project.id_user = user.id_user 
     LEFT JOIN project ON user_project.id_project = project.id_project 
-    LEFT JOIN project_user_role ON project_user_role.id_project = project.id_project AND id_user = user.id_user
-    LEFT JOIN project_role ON project_role.id_project_role = project_user_role.id_project_role 
     WHERE project.id_project = ?`,
     [req.params.id_project],
     (err, rows, fields) => {
@@ -230,8 +223,49 @@ router.put("/:id_project", supervisorCheck, async (req, res) => {
   );
 });
 
+router.put("/members/:id_project", supervisorCheck, async (req, res) => {
+  if (!req.body.members)
+    return res.status(400).json({ error: "Missing members parameter" });
+
+  connection.beginTransaction((err) => {
+    if (err) return res.status(500).json({ error: err });
+
+    // Removes all members from project
+    connection.query(
+      `DELETE FROM user_project WHERE id_project = ?`,
+      [req.params.id_project],
+      (err, rows, fields) => {
+        if (err)
+          return connection.rollback(() =>
+            res.status(500).json({ error: err })
+          );
+
+        // Inserts new members for project
+        let memberInsert = req.body.members.map((m) => [
+          req.params.id_project,
+          m,
+        ]);
+        connection.query(
+          `INSERT INTO user_project(id_project, id_user) VALUES ?`,
+          [memberInsert],
+          (err, rows, fields) => {
+            if (err)
+              return connection.rollback(() =>
+                res.status(500).json({ error: err })
+              );
+
+            connection.commit((err) => {
+              if (err) return res.status(500).json({ error: err });
+              res.status(200).json({ success: true });
+            });
+          }
+        );
+      }
+    );
+  });
+});
+
 router.delete("/:id_project", projectOwnerVerify, async (req, res) => {
-  console.log(req.params.id_project);
   connection.query(
     `DELETE FROM project WHERE id_project = ${req.params.id_project};`,
     (err, rows, fields) => {
